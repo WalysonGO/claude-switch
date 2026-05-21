@@ -1,0 +1,6 @@
+# Nunca versione profiles — eles contêm refresh tokens válidos.
+profiles/
+*.profile.json
+
+# macOS
+.DS_Store
