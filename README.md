@@ -1,6 +1,6 @@
 # claude-switch
 
-Trocar de conta no Claude Code CLI sem precisar de `/logout`, reabrir o navegador, autorizar de novo, etc. Você salva cada conta como um *profile* uma vez, e depois alterna entre elas com um comando.
+Trocar de conta no Claude Code CLI sem precisar de `/logout`, reabrir o navegador, autorizar de novo, etc. Você salva cada conta como um *profile* uma vez, e a partir daí alterna entre elas com um único comando.
 
 ## Por que existe
 
@@ -13,153 +13,179 @@ O fluxo nativo pra trocar de conta é:
 5. Autorizar o OAuth.
 6. Repetir tudo se quiser voltar pra primeira conta.
 
-O `claude-switch` evita esse ritual porque só rotaciona tokens já válidos que o Claude Code guarda localmente.
+Cansativo se você troca várias vezes por dia (ex.: conta pessoal vs. conta da empresa). O `claude-switch` faz isso em uma linha, sem browser, porque ele só rotaciona os *tokens já válidos* que o Claude Code guarda.
 
 ## Como funciona por baixo
 
-O Claude Code armazena estado de conta em credenciais OAuth + metadados globais:
+O Claude Code armazena o estado da conta em dois lugares:
 
-| Sistema | Tokens OAuth | Metadados da conta |
-|---|---|---|
-| macOS | Keychain — service `Claude Code-credentials`, account = `$USER` | `~/.claude.json` (`oauthAccount`, `userID`) |
-| Linux | `~/.claude/.credentials.json` (`claudeAiOauth`) | `~/.claude.json` (`oauthAccount`, `userID`) |
+| O que | Onde |
+|---|---|
+| Tokens OAuth (access + refresh) | macOS Keychain — service `Claude Code-credentials`, account = `$USER`; Linux — `~/.claude/.credentials.json` |
+| Metadados da conta (`oauthAccount`, `userID`) | `~/.claude.json` |
 
-Um **profile** é um JSON em `~/.claude/profiles/<nome>.json` com snapshot dos tokens e metadados. O comando `use` restaura esse snapshot no backend do sistema atual e atualiza `~/.claude.json`.
+Um **profile** é só um JSON em `~/.claude/profiles/<nome>.json` contendo um snapshot dos dois. O comando `use` restaura o snapshot — grava os tokens de volta no Keychain (macOS) ou em `~/.claude/.credentials.json` (Linux) e substitui `oauthAccount` + `userID` em `~/.claude.json`. O Claude Code refresca o access token sozinho se estiver vencido, então o navegador não precisa abrir de novo.
 
-No Linux, `claude-switch` preserva campos extras existentes em `~/.claude/.credentials.json`, como `organizationUuid`, e troca apenas `claudeAiOauth`.
+Os tokens continuam protegidos pelo Keychain do macOS (a senha da sua conta libera o acesso). No Linux, os tokens ficam no arquivo local `~/.claude/.credentials.json`. Os profiles ficam em arquivos locais que **você não deve versionar** — eles contêm refresh tokens válidos.
 
 ## Pré-requisitos
 
-### Obrigatórios
+### Obrigatórios (sem isso o script não roda)
 
-| Requisito | Como verificar | Como resolver |
+| Requisito | Como verificar | Como instalar / resolver |
 |---|---|---|
 | **macOS ou Linux** | `uname -s` → `Darwin` ou `Linux` | Windows não é suportado |
-| **bash** | `command -v bash` | macOS já vem com bash; Linux via gerenciador da distro |
-| **jq** | `jq --version` | macOS: `brew install jq`; Linux: `apt install jq`, `dnf install jq`, etc. |
-| **macOS: `security` CLI** | `command -v security` | Já vem no macOS |
+| **bash** | `command -v bash` | Já vem no macOS |
+| **`security` CLI (macOS)** | `command -v security` | Já vem no macOS (parte do `Security.framework`) |
+| **`jq`** | `jq --version` | `brew install jq` |
 
 ### Necessários pra ter o que gerenciar
 
 | Requisito | Como verificar | Como resolver |
 |---|---|---|
 | **Claude Code CLI instalado** | `claude --version` | `npm i -g @anthropic-ai/claude-code` |
-| **`~/.claude.json` criado** | `ls ~/.claude.json` | Rode `claude` uma vez |
-| **Pelo menos uma conta logada** | Abrir `claude` sem cair no login | Rode `claude` e complete OAuth no navegador |
+| **`~/.claude.json` criado** | `ls ~/.claude.json` | Rode `claude` uma vez; o arquivo é criado na inicialização |
+| **Pelo menos uma conta logada** | Conseguir abrir `claude` sem cair no login | Rode `claude` e complete o OAuth no navegador |
 
-## Verificação automática
+### Verificação automática
+
+Use o comando `doctor` — checa tudo de uma vez e mostra exatamente o que falta:
 
 ```bash
 claude-switch doctor
 ```
 
-Exemplo macOS:
+Saída esperada quando tudo está OK:
 
-```text
-  [ok] macOS (26.5) — backend: Keychain
+```
+  [ok] macOS (26.5)
   [ok] bash
   [ok] security CLI
-  [ok] jq (jq-1.7.1)
+  [ok] jq (jq-1.7.1-apple)
   [ok] claude CLI (2.1.142)
-  [ok] /Users/voce/.claude.json
-  [ok] credenciais ativas em Keychain (conta ativa: voce@exemplo.com)
-  [ok] profiles salvos: 2 (em /Users/voce/.claude/profiles)
+  [ok] /Users/marlos/.claude.json
+  [ok] credenciais no Keychain (conta ativa: voce@exemplo.com)
+  [ok] profiles salvos: 2 (em /Users/marlos/.claude/profiles)
 
 tudo ok pra rodar.
 ```
 
-Exemplo Linux:
+No Linux, a linha de credenciais aponta para `~/.claude/.credentials.json` em vez do Keychain.
 
-```text
-  [ok] Linux — backend: /home/voce/.claude/.credentials.json
-  [ok] bash
-  [ok] jq (jq-1.7.1)
-  [ok] claude CLI (2.1.142)
-  [ok] /home/voce/.claude.json
-  [ok] /home/voce/.claude/.credentials.json
-  [ok] credenciais ativas em /home/voce/.claude/.credentials.json (conta ativa: voce@exemplo.com)
-  [ok] profiles salvos: 2 (em /home/voce/.claude/profiles)
+Se aparecer `[falta]` em algum item obrigatório, o `doctor` sai com código de saída `1`. Itens marcados `[aviso]` não bloqueiam o script em si, mas indicam coisas que você vai precisar antes de usar `save` (ex.: não estar logado em nenhuma conta).
 
-tudo ok pra rodar.
-```
-
-Itens `[falta]` fazem `doctor` sair com código `1`. Itens `[aviso]` não bloqueiam instalação, mas indicam passos necessários antes de `save`.
+O `install.sh` roda essas mesmas verificações antes de instalar.
 
 ## Instalação
 
 ```bash
 cd ~/Developer/claude-switch
 ./install.sh                  # auto-detecta o shell
-./install.sh --shell=fish     # força fish
+./install.sh --shell=fish     # força fish (recomendado pra quem usa fish)
 ./install.sh --shell=zsh      # força zsh
 ./install.sh --shell=bash     # força bash
 ```
 
+> **Importante para usuários de fish**: o macOS guarda como "shell de login" o `/bin/bash` por padrão, mesmo se você abre o terminal direto no fish. Auto-detecção pode errar nesse caso — use `--shell=fish` explicitamente.
+>
+> **Importante para usuários Linux**: ao final da instalação, o script recarrega o shell automaticamente quando possível para disponibilizar `claude-switch` no terminal atual.
+
 O instalador:
 
-1. Verifica sistema, `bash`, `jq`, Claude Code e backend de credenciais.
-2. Copia o script para `~/.claude/bin/claude-switch`.
+1. Roda todas as verificações de pré-requisitos (mesma coisa que `claude-switch doctor`).
+2. Copia o script para `~/.claude/bin/claude-switch` (deixa executável).
 3. Cria `~/.claude/profiles/` se não existir.
-4. Adiciona `~/.claude/bin` ao `PATH` no `fish`, `zsh` ou `bash`.
-5. No Linux interativo, abre um novo shell já com `PATH` recarregado. Em ambientes não interativos, mostra o comando de `source`/`exec` necessário.
+4. Adiciona `~/.claude/bin` ao seu `PATH`:
+   - **fish**: `fish_add_path -U ~/.claude/bin` (universal, persiste entre sessões).
+   - **zsh**: adiciona uma linha ao `~/.zshrc` (idempotente — só adiciona se não existir).
+   - **bash**: adiciona ao `~/.bash_profile` (se existir) ou `~/.bashrc`.
+5. Mostra como recarregar o `PATH`.
 
-Instalação manual: copie `claude-switch` pra qualquer diretório no `PATH` e rode `chmod +x`.
+Se preferir instalar à mão, é só copiar `claude-switch` pra qualquer lugar no `PATH` e dar `chmod +x`.
 
 ## Uso
 
-### Primeira vez
+### Primeira vez (registro de cada conta)
+
+Esse passo só acontece uma vez por conta. Depois você nunca mais vê o navegador (até o refresh token expirar, o que demora bastante).
 
 ```bash
-# 1) Você já está logado em uma conta (ex.: pessoal).
+# 1) Você já está logado em uma conta (ex.: pessoal). Salve como profile:
 claude-switch save pessoal
 
-# 2) Saia da conta atual e logue na conta nova.
+# 2) Saia da conta atual e logue na conta nova:
 claude-switch logout
-claude
+claude               # abre o navegador, faz login na outra conta
 
-# 3) Salve a segunda conta.
+# 3) Salve a segunda conta como profile:
 claude-switch save trabalho
 ```
 
-### Uso recorrente
+### Uso recorrente (o que você vai fazer de fato)
 
 ```bash
-claude-switch use pessoal
-claude-switch use trabalho
-claude-switch list
-claude-switch current
+claude-switch use pessoal      # ativa a conta pessoal
+claude-switch use trabalho     # ativa a conta de trabalho
+claude-switch list             # lista profiles ('*' marca o ativo)
+claude-switch current          # mostra qual conta está logada agora
 ```
 
-Depois de `use`, rode `claude` normalmente. Ele inicia com a conta restaurada.
+Depois de `use`, é só rodar `claude` normalmente — já vai estar na conta certa.
 
-## Referência rápida
+### Outros comandos
+
+```bash
+claude-switch logout           # remove os tokens do Keychain/arquivo local (profiles ficam)
+claude-switch rm <nome>        # apaga um profile salvo
+claude-switch help             # mostra a ajuda
+```
+
+## Referência rápida dos comandos
 
 | Comando | O que faz |
 |---|---|
-| `claude-switch save <nome>` | Salva a conta atualmente logada como profile |
-| `claude-switch use <nome>` | Ativa o profile sem browser |
-| `claude-switch list` ou `ls` | Lista profiles e marca o ativo com `*` |
-| `claude-switch current` | Mostra conta ativa |
-| `claude-switch logout` | Remove tokens do backend atual sem apagar profiles |
-| `claude-switch rm <nome>` | Apaga profile salvo |
-| `claude-switch doctor` | Verifica ambiente |
-| `claude-switch help` | Mostra ajuda |
+| `claude-switch save <nome>` | Salva a conta atualmente logada como profile `<nome>` |
+| `claude-switch use <nome>` | Ativa o profile `<nome>` (sem browser) |
+| `claude-switch list` (ou `ls`) | Lista todos os profiles e o e-mail de cada |
+| `claude-switch current` | Mostra qual conta está ativa agora |
+| `claude-switch logout` | Limpa os tokens do Keychain/arquivo local (não apaga profiles) |
+| `claude-switch rm <nome>` | Apaga o profile `<nome>` do disco |
+| `claude-switch doctor` | Verifica pré-requisitos e estado do ambiente |
+| `claude-switch help` | Mostra a ajuda |
 
-## Cuidados de segurança
+## Cenários comuns
 
-- **Não versione `~/.claude/profiles/`**. Profiles contêm `refreshToken` válido.
-- **No Linux, proteja `~/.claude/.credentials.json`**. Esse arquivo também contém token válido.
-- **Use canais seguros para backup**. Não cole profiles em chat, issue, email ou gist.
-- **Refresh token expira**. Se o Claude pedir login após `use`, faça login e rode `claude-switch save <nome>` de novo.
-- **Processos abertos não relêem estado**. Feche e reabra `claude` depois de trocar profile.
+**Trocar de conta no meio do dia:**
+```bash
+claude-switch use trabalho
+claude
+```
 
-## Testes manuais
+**Atualizar um profile (porque o token foi renovado e você quer salvar o estado novo):**
+```bash
+# basta dar save de novo com o mesmo nome — sobrescreve.
+claude-switch save trabalho
+```
 
-Fluxo AAA sugerido para validar sem usar tokens reais:
+**Logar em uma terceira conta:**
+```bash
+claude-switch logout
+claude              # navegador abre, loga na conta nova
+claude-switch save cliente-x
+```
 
-1. **Arrange**: crie `HOME` temporário com `.claude.json`, `.claude/.credentials.json` e profiles fake.
-2. **Act**: rode `HOME=/tmp/claude-switch-test ./claude-switch save teste`, `list`, `use teste`, `current`, `logout`.
-3. **Assert**: valide JSON com `jq`, saída esperada, preservação de `organizationUuid`, permissões `0600` e exit code.
+**Ver se você está na conta certa antes de mandar uma pergunta cara:**
+```bash
+claude-switch current
+```
+
+## Cuidados
+
+- **Não versione `~/.claude/profiles/`**. Os arquivos ali dentro contêm `refreshToken` válidos — quem tiver o arquivo loga como você. O `.gitignore` deste repositório já bloqueia, mas se você mover os profiles pra outro lugar, lembre disso.
+- **No Linux, não versione `~/.claude/.credentials.json`**. Esse arquivo também contém tokens válidos.
+- **Backup**: se você quiser passar uma conta pra outra máquina sua, copie o JSON do profile via canal seguro (AirDrop, scp). Não cole em chat/email.
+- **Refresh token expira**: eventualmente o refresh token vira (semanas/meses). Quando isso acontecer, `claude-switch use <nome>` ainda restaura o estado, mas o próximo `claude` vai pedir login pelo navegador. Aí você roda `claude-switch save <nome>` de novo pra atualizar o profile.
+- **Conta atual não salva**: se você der `use` em um profile sem ter salvado a conta atualmente ativa, o script avisa antes — você pode cancelar com Ctrl-C e dar `save` primeiro.
 
 ## Desinstalação
 
@@ -168,30 +194,27 @@ cd ~/Developer/claude-switch
 ./uninstall.sh
 ```
 
-Remove só `~/.claude/bin/claude-switch`. Profiles em `~/.claude/profiles/` e linha de `PATH` ficam para remoção manual.
+Isso remove só o binário em `~/.claude/bin/claude-switch`. Os profiles em `~/.claude/profiles/` ficam (apague à mão se quiser). A linha de `PATH` adicionada ao seu shell rc também fica — remova manualmente se quiser.
 
 ## Estrutura do projeto
 
-```text
-claude-switch/
-├── claude-switch
-├── install.sh
-├── uninstall.sh
-├── README.md
-├── QUESTIONS.md
-└── .gitignore
+```
+~/Developer/claude-switch/
+├── claude-switch          # o script em si
+├── README.md              # este documento
+├── install.sh             # instalador
+├── uninstall.sh           # desinstalador
+└── .gitignore             # garante que profiles não vazem se você versionar
 ```
 
 ## Troubleshooting
 
-**`jq não encontrado`** → instale `jq` pelo Homebrew ou gerenciador da distro.
+**`jq não encontrado`** → `brew install jq`.
 
-**`sem credenciais ativas` ao dar `save`** → rode `claude` e faça login primeiro.
+**`sem credenciais ativas no Keychain`** ou **`sem credenciais ativas em ~/.claude/.credentials.json`** ao dar `save` → você não está logado. Rode `claude` e faça login primeiro.
 
-**`~/.claude.json não encontrado`** → rode `claude` uma vez.
+**`~/.claude.json não encontrado`** → você nunca rodou `claude` nessa máquina. Rode uma vez pra ele inicializar.
 
-**Linux: `~/.claude/.credentials.json` não existe** → rode `claude` e complete OAuth no navegador.
+**`use` ativou o profile mas o Claude continua na conta antiga** → certifique-se de que o processo `claude` não estava aberto (ele só relê as credenciais ao iniciar). Saia e rode de novo.
 
-**`use` ativou profile mas Claude continua na conta antiga** → encerre processo `claude` aberto e rode de novo.
-
-**Quero contas diferentes em sessões simultâneas** → este script muda estado global do Claude Code; use usuários/sandboxes separados para paralelismo real.
+**Quero rodar comandos diferentes em sessões diferentes ao mesmo tempo (sem mexer no estado global)** → não dá com este script (o Claude Code lê de um único lugar). Pra esse caso, melhor usar perfis separados de macOS ou containers.

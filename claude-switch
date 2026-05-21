@@ -2,9 +2,8 @@
 # claude-switch — troca de conta no Claude Code sem o ritual de /logout + browser.
 #
 # Como funciona:
-#   - macOS: credenciais OAuth vivem no Keychain (service "Claude Code-credentials", account = $USER).
-#   - Linux: credenciais OAuth vivem em ~/.claude/.credentials.json.
-#   - Metadados da conta vivem em ~/.claude.json (.oauthAccount, .userID).
+#   - Credenciais OAuth vivem no Keychain (service "Claude Code-credentials", account = $USER).
+#   - Os metadados da conta vivem em ~/.claude.json (.oauthAccount, .userID).
 #   - Um "profile" é um snapshot dos dois: ~/.claude/profiles/<nome>.json.
 #
 # Uso:
@@ -25,118 +24,56 @@
 set -euo pipefail
 
 SERVICE="Claude Code-credentials"
-ACCOUNT="${USER:-$(id -un 2>/dev/null || echo "")}"
-OS_NAME="$(uname -s)"
+ACCOUNT="${USER}"
 CLAUDE_JSON="${HOME}/.claude.json"
-CLAUDE_DIR="${HOME}/.claude"
-LINUX_CREDENTIALS_JSON="${CLAUDE_DIR}/.credentials.json"
-PROFILES_DIR="${CLAUDE_DIR}/profiles"
+LINUX_CREDENTIALS_JSON="${HOME}/.claude/.credentials.json"
+PROFILES_DIR="${HOME}/.claude/profiles"
+OS_NAME="$(uname -s)"
 
 mkdir -p "${PROFILES_DIR}"
 
 die()  { printf 'erro: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 
-require_jq() { command -v jq >/dev/null || die "jq não encontrado (macOS: brew install jq; Linux: use o gerenciador de pacotes da sua distro)"; }
+require_jq() { command -v jq >/dev/null || die "jq não encontrado (brew install jq)"; }
 
-claude_version() {
-  if command -v timeout >/dev/null; then
-    timeout 3 claude --version 2>/dev/null | head -1 || echo 'versão desconhecida'
-  else
-    claude --version 2>/dev/null | head -1 || echo 'versão desconhecida'
-  fi
-}
-
-credential_backend() {
-  case "${OS_NAME}" in
-    Darwin) printf 'keychain' ;;
-    Linux)  printf 'file' ;;
-    *)      printf 'unsupported' ;;
-  esac
-}
-
-backend_label() {
-  case "$(credential_backend)" in
-    keychain) printf 'Keychain' ;;
-    file) printf '%s' "${LINUX_CREDENTIALS_JSON}" ;;
-    *) printf 'não suportado' ;;
-  esac
-}
-
-require_supported_os() {
-  case "$(credential_backend)" in
-    keychain|file) ;;
-    *) die "sistema não suportado: ${OS_NAME} (suportados: macOS/Darwin e Linux)" ;;
-  esac
-}
-
+# Lê o JSON OAuth do Keychain. Retorna string vazia se não houver entrada.
 keychain_read() {
-  command -v security >/dev/null || return 0
-  security find-generic-password -s "${SERVICE}" -a "${ACCOUNT}" -w 2>/dev/null || true
+  if [[ "${OS_NAME}" == "Linux" ]]; then
+    [[ -f "${LINUX_CREDENTIALS_JSON}" ]] || return 0
+    jq -c '.claudeAiOauth // empty' "${LINUX_CREDENTIALS_JSON}" 2>/dev/null || true
+  else
+    security find-generic-password -s "${SERVICE}" -a "${ACCOUNT}" -w 2>/dev/null || true
+  fi
 }
 
 keychain_write() {
-  command -v security >/dev/null || die "'security' CLI ausente"
   local creds="$1"
-  security add-generic-password -U -s "${SERVICE}" -a "${ACCOUNT}" -w "${creds}" >/dev/null
+  if [[ "${OS_NAME}" == "Linux" ]]; then
+    local tmp; tmp="$(mktemp)"
+    if [[ -f "${LINUX_CREDENTIALS_JSON}" ]]; then
+      jq --argjson credentials "${creds}" '.claudeAiOauth = $credentials' "${LINUX_CREDENTIALS_JSON}" > "${tmp}"
+    else
+      mkdir -p "${HOME}/.claude"
+      jq -n --argjson credentials "${creds}" '{claudeAiOauth: $credentials}' > "${tmp}"
+    fi
+    chmod 600 "${tmp}"
+    mv "${tmp}" "${LINUX_CREDENTIALS_JSON}"
+  else
+    security add-generic-password -U -s "${SERVICE}" -a "${ACCOUNT}" -w "${creds}" >/dev/null
+  fi
 }
 
 keychain_delete() {
-  command -v security >/dev/null || return 0
-  security delete-generic-password -s "${SERVICE}" -a "${ACCOUNT}" >/dev/null 2>&1 || true
-}
-
-file_read() {
-  [[ -f "${LINUX_CREDENTIALS_JSON}" ]] || return 0
-  jq -c '.claudeAiOauth // empty' "${LINUX_CREDENTIALS_JSON}" 2>/dev/null || true
-}
-
-file_write() {
-  local creds="$1"
-  mkdir -p "${CLAUDE_DIR}"
-  local tmp; tmp="$(mktemp "${LINUX_CREDENTIALS_JSON}.tmp.XXXXXX")"
-
-  if [[ -f "${LINUX_CREDENTIALS_JSON}" ]]; then
-    jq --argjson credentials "${creds}" '.claudeAiOauth = $credentials' "${LINUX_CREDENTIALS_JSON}" > "${tmp}"
+  if [[ "${OS_NAME}" == "Linux" ]]; then
+    [[ -f "${LINUX_CREDENTIALS_JSON}" ]] || return 0
+    local tmp; tmp="$(mktemp)"
+    jq 'del(.claudeAiOauth)' "${LINUX_CREDENTIALS_JSON}" > "${tmp}"
+    chmod 600 "${tmp}"
+    mv "${tmp}" "${LINUX_CREDENTIALS_JSON}"
   else
-    jq -n --argjson credentials "${creds}" '{claudeAiOauth: $credentials}' > "${tmp}"
+    security delete-generic-password -s "${SERVICE}" -a "${ACCOUNT}" >/dev/null 2>&1 || true
   fi
-
-  chmod 600 "${tmp}"
-  mv "${tmp}" "${LINUX_CREDENTIALS_JSON}"
-}
-
-file_delete() {
-  [[ -f "${LINUX_CREDENTIALS_JSON}" ]] || return 0
-  local tmp; tmp="$(mktemp "${LINUX_CREDENTIALS_JSON}.tmp.XXXXXX")"
-  jq 'del(.claudeAiOauth)' "${LINUX_CREDENTIALS_JSON}" > "${tmp}"
-  chmod 600 "${tmp}"
-  mv "${tmp}" "${LINUX_CREDENTIALS_JSON}"
-}
-
-credentials_read() {
-  require_supported_os
-  case "$(credential_backend)" in
-    keychain) keychain_read ;;
-    file) file_read ;;
-  esac
-}
-
-credentials_write() {
-  require_supported_os
-  local creds="$1"
-  case "$(credential_backend)" in
-    keychain) keychain_write "${creds}" ;;
-    file) file_write "${creds}" ;;
-  esac
-}
-
-credentials_delete() {
-  require_supported_os
-  case "$(credential_backend)" in
-    keychain) keychain_delete ;;
-    file) file_delete ;;
-  esac
 }
 
 current_email() {
@@ -146,18 +83,13 @@ current_email() {
 
 profile_path() { printf '%s/%s.json' "${PROFILES_DIR}" "$1"; }
 
-validate_profile_name() {
-  local name="$1"
-  [[ "${name}" != *"/"* && "${name}" != "." && "${name}" != ".." && -n "${name}" ]] || die "nome de profile inválido: ${name}"
-}
-
 cmd_current() {
   require_jq
   local creds email
-  creds="$(credentials_read)"
+  creds="$(keychain_read)"
   email="$(current_email)"
   if [[ -z "${creds}" ]]; then
-    info "ativo: ${email} (sem credenciais em $(backend_label) — você está deslogado)"
+    info "ativo: ${email} (sem credenciais no Keychain — você está deslogado)"
   else
     info "ativo: ${email}"
   fi
@@ -166,24 +98,20 @@ cmd_current() {
 cmd_save() {
   require_jq
   local name="${1:-}"; [[ -n "${name}" ]] || die "uso: claude-switch save <nome>"
-  validate_profile_name "${name}"
-  local creds; creds="$(credentials_read)"
-  [[ -n "${creds}" ]] || die "sem credenciais ativas em $(backend_label) — faça login antes (claude)"
+  local creds; creds="$(keychain_read)"
+  [[ -n "${creds}" ]] || die "sem credenciais ativas no Keychain — faça login antes (claude)"
   [[ -f "${CLAUDE_JSON}" ]] || die "~/.claude.json não encontrado"
 
   local oauth_account user_id
   oauth_account="$(jq -c '.oauthAccount // null' "${CLAUDE_JSON}")"
   user_id="$(jq -r '.userID // ""' "${CLAUDE_JSON}")"
 
-  local tmp; tmp="$(mktemp "$(profile_path "${name}").tmp.XXXXXX")"
   jq -n \
     --argjson credentials "${creds}" \
     --argjson oauthAccount "${oauth_account}" \
     --arg userID "${user_id}" \
     '{credentials: $credentials, oauthAccount: $oauthAccount, userID: $userID}' \
-    > "${tmp}"
-  chmod 600 "${tmp}"
-  mv "${tmp}" "$(profile_path "${name}")"
+    > "$(profile_path "${name}")"
 
   info "salvo profile '${name}' ($(jq -r '.oauthAccount.emailAddress // "?"' "$(profile_path "${name}")"))"
 }
@@ -191,24 +119,21 @@ cmd_save() {
 cmd_use() {
   require_jq
   local name="${1:-}"; [[ -n "${name}" ]] || die "uso: claude-switch use <nome>"
-  validate_profile_name "${name}"
   local p; p="$(profile_path "${name}")"
   [[ -f "${p}" ]] || die "profile '${name}' não existe — use 'claude-switch list'"
-  [[ -f "${CLAUDE_JSON}" ]] || die "~/.claude.json não encontrado"
 
-  local current_creds; current_creds="$(credentials_read)"
+  # Avisa se vai sobrescrever uma conta ainda não salva como profile.
+  local current_creds; current_creds="$(keychain_read)"
   if [[ -n "${current_creds}" ]]; then
     local cur_email; cur_email="$(current_email)"
     local found=""
-    shopt -s nullglob
-    local f
     for f in "${PROFILES_DIR}"/*.json; do
+      [[ -f "${f}" ]] || continue
       if [[ "$(jq -r '.oauthAccount.emailAddress // ""' "${f}")" == "${cur_email}" ]]; then
         found="$(basename "${f}" .json)"
         break
       fi
     done
-    shopt -u nullglob
     if [[ -z "${found}" ]]; then
       printf "aviso: a conta atual (%s) não está salva em nenhum profile.\n" "${cur_email}" >&2
       printf "       digite 'y' pra continuar e perder a sessão, ou Ctrl-C pra cancelar: " >&2
@@ -219,14 +144,14 @@ cmd_use() {
 
   local creds; creds="$(jq -c '.credentials' "${p}")"
   [[ "${creds}" != "null" ]] || die "profile '${name}' não tem credenciais"
-  credentials_write "${creds}"
+  keychain_write "${creds}"
 
-  local tmp; tmp="$(mktemp "${CLAUDE_JSON}.tmp.XXXXXX")"
+  # Substitui .oauthAccount e .userID dentro de ~/.claude.json (preservando o resto).
+  local tmp; tmp="$(mktemp)"
   jq \
     --slurpfile prof "${p}" \
     '.oauthAccount = $prof[0].oauthAccount | .userID = $prof[0].userID' \
     "${CLAUDE_JSON}" > "${tmp}"
-  chmod --reference="${CLAUDE_JSON}" "${tmp}" 2>/dev/null || true
   mv "${tmp}" "${CLAUDE_JSON}"
 
   info "ativo: $(jq -r '.oauthAccount.emailAddress // "?"' "${p}") (profile '${name}')"
@@ -235,7 +160,7 @@ cmd_use() {
 cmd_list() {
   require_jq
   local cur_email; cur_email="$(current_email)"
-  local has_creds=""; [[ -n "$(credentials_read)" ]] && has_creds="1"
+  local has_creds=""; [[ -n "$(keychain_read)" ]] && has_creds="1"
 
   shopt -s nullglob
   local files=("${PROFILES_DIR}"/*.json)
@@ -244,7 +169,6 @@ cmd_list() {
     info "(nenhum profile salvo — use 'claude-switch save <nome>')"
     return
   fi
-  local f
   for f in "${files[@]}"; do
     local name email mark
     name="$(basename "${f}" .json)"
@@ -256,13 +180,12 @@ cmd_list() {
 }
 
 cmd_logout() {
-  credentials_delete
-  info "credenciais removidas de $(backend_label) (profiles salvos foram mantidos)"
+  keychain_delete
+  info "credenciais removidas do Keychain (profiles salvos foram mantidos)"
 }
 
 cmd_rm() {
   local name="${1:-}"; [[ -n "${name}" ]] || die "uso: claude-switch rm <nome>"
-  validate_profile_name "${name}"
   local p; p="$(profile_path "${name}")"
   [[ -f "${p}" ]] || die "profile '${name}' não existe"
   rm "${p}"
@@ -270,6 +193,7 @@ cmd_rm() {
 }
 
 cmd_doctor() {
+  # Verifica o ambiente. Não modifica nada. Saída: 0 = tudo ok, 1 = algo faltando.
   local fail=0
   local ok="\033[1;32mok\033[0m"
   local nok="\033[1;31mfalta\033[0m"
@@ -277,19 +201,25 @@ cmd_doctor() {
 
   check() { printf "  [%b] %s\n" "$1" "$2"; }
 
-  case "$(credential_backend)" in
-    keychain) check "${ok}" "macOS ($(sw_vers -productVersion 2>/dev/null || echo '?')) — backend: Keychain" ;;
-    file) check "${ok}" "Linux — backend: ${LINUX_CREDENTIALS_JSON}" ;;
-    *) check "${nok}" "sistema não suportado (${OS_NAME}) — suportados: macOS/Darwin e Linux"; fail=1 ;;
-  esac
+  # 1) macOS
+  if [[ "${OS_NAME}" == "Darwin" ]]; then
+    check "${ok}" "macOS ($(sw_vers -productVersion 2>/dev/null || echo '?'))"
+  elif [[ "${OS_NAME}" == "Linux" ]]; then
+    check "${ok}" "Linux"
+  else
+    check "${nok}" "sistema não suportado (${OS_NAME}) — script não funciona aqui"
+    fail=1
+  fi
 
+  # 2) bash
   if command -v bash >/dev/null; then
     check "${ok}" "bash"
   else
     check "${nok}" "bash não encontrado"; fail=1
   fi
 
-  if [[ "$(credential_backend)" == "keychain" ]]; then
+  # 3) security CLI
+  if [[ "${OS_NAME}" == "Darwin" ]]; then
     if command -v security >/dev/null; then
       check "${ok}" "security CLI"
     else
@@ -297,42 +227,51 @@ cmd_doctor() {
     fi
   fi
 
+  # 4) jq (obrigatório)
   if command -v jq >/dev/null; then
     check "${ok}" "jq ($(jq --version))"
   else
-    check "${nok}" "jq não instalado"; fail=1
+    check "${nok}" "jq não instalado — rode: brew install jq"; fail=1
   fi
 
+  # 5) Claude Code CLI (não é obrigatório pra rodar este script, mas é o ponto)
   if command -v claude >/dev/null; then
-    check "${ok}" "claude CLI ($(claude_version))"
+    check "${ok}" "claude CLI ($(claude --version 2>/dev/null | head -1 || echo '?'))"
   else
     check "${warn}" "comando 'claude' não está no PATH — instale o Claude Code (npm i -g @anthropic-ai/claude-code)"
   fi
 
+  # 6) ~/.claude.json
   if [[ -f "${CLAUDE_JSON}" ]]; then
     check "${ok}" "${CLAUDE_JSON}"
   else
-    check "${warn}" "${CLAUDE_JSON} não existe — rode 'claude' uma vez antes de 'save'"
+    check "${warn}" "${CLAUDE_JSON} não existe — rode 'claude' uma vez antes de usar 'save'"
   fi
 
-  if [[ "$(credential_backend)" == "file" ]]; then
-    if [[ -f "${LINUX_CREDENTIALS_JSON}" ]]; then
-      check "${ok}" "${LINUX_CREDENTIALS_JSON}"
-    else
-      check "${warn}" "${LINUX_CREDENTIALS_JSON} não existe — faça login com 'claude' antes do primeiro 'save'"
-    fi
-  fi
-
-  if [[ -n "$(credentials_read)" ]]; then
+  # 7) credenciais no Keychain
+  if [[ -n "$(keychain_read)" ]]; then
     if command -v jq >/dev/null && [[ -f "${CLAUDE_JSON}" ]]; then
-      check "${ok}" "credenciais ativas em $(backend_label) (conta ativa: $(current_email))"
+      if [[ "${OS_NAME}" == "Linux" ]]; then
+        check "${ok}" "credenciais em ${LINUX_CREDENTIALS_JSON} (conta ativa: $(current_email))"
+      else
+        check "${ok}" "credenciais no Keychain (conta ativa: $(current_email))"
+      fi
     else
-      check "${ok}" "credenciais ativas em $(backend_label)"
+      if [[ "${OS_NAME}" == "Linux" ]]; then
+        check "${ok}" "credenciais em ${LINUX_CREDENTIALS_JSON}"
+      else
+        check "${ok}" "credenciais no Keychain"
+      fi
     fi
   else
-    check "${warn}" "sem credenciais ativas em $(backend_label) — você está deslogado (faça login com 'claude' antes de 'save')"
+    if [[ "${OS_NAME}" == "Linux" ]]; then
+      check "${warn}" "sem credenciais em ${LINUX_CREDENTIALS_JSON} — você está deslogado (faça login com 'claude' antes de 'save')"
+    else
+      check "${warn}" "sem credenciais no Keychain — você está deslogado (faça login com 'claude' antes de 'save')"
+    fi
   fi
 
+  # 8) profiles
   shopt -s nullglob
   local files=("${PROFILES_DIR}"/*.json)
   shopt -u nullglob
